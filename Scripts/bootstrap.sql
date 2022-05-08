@@ -32,3 +32,12 @@ if OBJECT_ID('dbo.Guid','U') IS NULL
     )
 ELSE
     PRINT 'dbo.Guid EXISTS'
+
+if OBJECT_ID('dbo.Children','U') IS NULL
+    create table Children (
+        Id UNIQUEIDENTIFIER PRIMARY KEY default NEWSEQUENTIALID(),
+        ParentWithGuidId UNIQUEIDENTIFIER NOT NULL,
+        ChildName VARCHAR(100) NOT NULL
+    )
+ELSE
+    PRINT 'dbo.Children EXISTS'

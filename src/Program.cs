@@ -46,6 +46,14 @@ void insertGuidDapper(DbConnection conn, ParentWithGuid c)
     WriteLine($"Affected Rows: {affectedRows}");
 }
 
+void insertChildFor(SqlConnection connection, ParentWithGuid parentWithGuid)
+{
+    var kid = new Child() { ParentWithGuidId = parentWithGuid.Id, ChildName = DateTime.Now.ToString() };
+    connection.Insert(kid);
+}
+
+//============================== main
+
 using var connection = new SqlConnection(connString);
 
 var parentWithInt = new ParentWithInt() { S = $"test at {DateTime.Now}", I = 1 };
@@ -55,11 +63,13 @@ FluentMapper.Initialize(config =>
     {
         config.AddMap(new IntMap());
         config.AddMap(new GuidMap());
+        config.AddMap(new ChildMap());
         config.ForDommel();
     });
 DommelMapper.AddSqlBuilder(typeof(SqlConnection), new GuidSqlServerSqlBuilder());
 
 var loop = 1;
+var childLoop = 10;
 if (args.Count() > 0)
     int.TryParse(args[0], out loop);
 
@@ -79,10 +89,21 @@ WriteLine($"Updated {parentWithGuid.Id}");
 var x = connection.FirstOrDefault<ParentWithGuid>(p => p.Id == parentWithGuid.Id );
 WriteLine($"I is {x?.I}");
 
+for (int i = 0; i < childLoop; i++)
+{
+    insertChildFor(connection,parentWithGuid);
+}
+WriteLine($"Added {childLoop} kids");
+
+var combined = connection.FirstOrDefault<ParentWithGuid,Child,ParentWithGuid>( p => p.Id == parentWithGuid.Id );
+WriteLine($"Combined has {combined?.Children.Count} kids");
+
+
 var deleteMe = new Guid[] {parentWithGuid.Id};
 connection.DeleteMultiple<ParentWithGuid>(o => deleteMe.Contains(o.Id));
 WriteLine($"Deleted {parentWithGuid.Id}");
 
+//============================== classes
 public class GuidSqlServerSqlBuilder : SqlServerSqlBuilder
 {
     public override string BuildInsert(Type type, string tableName, string[] columnNames, string[] paramNames)
@@ -98,14 +119,38 @@ class ParentWithInt
     public int I { get; set; }
 }
 
-class ParentWithGuid
+class ParentWithGuid : IEquatable<ParentWithGuid>
 {
     public Guid Id { get; set; }
     public string S { get; set; } = "";
     public int I { get; set; }
+
+    public IList<Child> Children { get; set; } = new List<Child>();
+
+    public bool Equals(ParentWithGuid? other)
+    {
+        return Id == (other?.Id ?? Guid.Empty);
+    }
 }
 
+class Child : IEquatable<Child> {
+    public Guid Id { get; set; }
+    public Guid ParentWithGuidId { get; set; }
+    public string ChildName { get; set; } = "";
 
+    public bool Equals(Child? other)
+    {
+        return Id == (other?.Id ?? Guid.Empty);
+    }
+}
+
+class ChildMap : DommelEntityMap<Child>
+{
+    public ChildMap()
+    {
+        ToTable("Children");
+    }
+}
 class GuidMap : DommelEntityMap<ParentWithGuid>
 {
     public GuidMap()
