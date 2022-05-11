@@ -1,11 +1,17 @@
 /*
-delete from IntKey
-delete from GuidKey
-delete from Guid
+DELETE FROM [dapper].[dbo].[IntKey]
+DELETE FROM [dapper].[dbo].[GuidKey]
+DELETE FROM [dapper].[dbo].[Guid]
 */
+use dapper;
 
-SELECT *  FROM [dapper].[dbo].[IntKey]
-SELECT *  FROM [dapper].[dbo].[GuidKey]
-where id = '0e44433e-f36b-1410-876a-002fabbcf085'
-SELECT *  FROM [dapper].[dbo].[Guid]
+SELECT *
+FROM IntKey
 
+SELECT g.Id, S as Parent, I, ChildName
+FROM GuidKey g
+LEFT JOIN Children c
+ ON c.ParentWithGuidId = g.id
+
+SELECT *
+FROM Guid

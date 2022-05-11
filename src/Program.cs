@@ -1,32 +1,43 @@
 ﻿using System.Data.Common;
 using System.Data.SqlClient;
-using System.Reflection;
+using Microsoft.Extensions.Configuration;
 using Dapper;
 using Dapper.FluentMap;
 using Dapper.FluentMap.Dommel;
-using Dapper.FluentMap.Dommel.Mapping;
 using Dommel;
 using MassTransit;
 using static System.Console;
+using Seekatar.Tools;
+using System.Text.Json;
 
 #pragma warning disable CS8321 // unused fn
 
-var connString = "Server=localhost;Database=dapper;User Id=sa;Password=Passw0rd!;";
-
+//============================== worker fns
 void insertIntKeyDapper(DbConnection conn, ParentWithInt c)
 {
     var sql = "INSERT INTO IntKey (S,I) VALUES (@S,@I)";
 
     var affectedRows = conn.Execute(sql, new { S = $"Dapper at {DateTime.Now}", c.I });
 
-    WriteLine($"Affected Rows: {affectedRows}");
+    WriteLine($"Inserted {affectedRows} into IntKey");
+}
+
+void insertGuidKeyDapper(DbConnection conn, ParentWithGuid c)
+{
+    var sql = "INSERT INTO Guid (Id, S, I) VALUES (@Id, @S,@I)";
+
+    var affectedRows = conn.Execute(sql, new { Id = NewId.NextGuid(), S = $"Dapper at {DateTime.Now}", c.I });
+
+    WriteLine($"Dapper Inserted {affectedRows} into GuidKey");
 }
 
 void insertIntKeyDommel(DbConnection conn, ParentWithInt c)
 {
     var key = conn.Insert(c);
+
     c.S = $"Dommel at {DateTime.Now}";
-    WriteLine($"Inserted key is: {key}");
+
+    WriteLine($"Inserted key to IntKey is {key}");
 }
 
 void insertGuidKeyDommel(DbConnection conn, ParentWithGuid c)
@@ -35,15 +46,7 @@ void insertGuidKeyDommel(DbConnection conn, ParentWithGuid c)
     var key = conn.Insert(c);
     c.Id = (key as Guid?) ?? throw new Exception("ow!");
 
-    WriteLine($"Inserted key is: {key}. C.Id is {c.Id}");
-}
-
-void insertGuidDapper(DbConnection conn, ParentWithGuid c)
-{
-    var sql = "INSERT INTO Guid (Id, S, I) VALUES (@Id, @S,@I)";
-
-    var affectedRows = conn.Execute(sql, new { Id = NewId.NextGuid(), S = $"Dapper at {DateTime.Now}", c.I });
-    WriteLine($"Affected Rows: {affectedRows}");
+    WriteLine($"Inserted key is to GuidKey is {key}");
 }
 
 void insertChildFor(SqlConnection connection, ParentWithGuid parentWithGuid)
@@ -53,12 +56,15 @@ void insertChildFor(SqlConnection connection, ParentWithGuid parentWithGuid)
 }
 
 //============================== main
+var configuration = new ConfigurationBuilder()
+            .AddSharedDevSettings()
+            .AddJsonFile("appsettings.json", true, true)
+            .AddEnvironmentVariables()
+            .Build();
 
-using var connection = new SqlConnection(connString);
+using var connection = new SqlConnection(configuration.GetConnectionString("SqlServer"));
 
-var parentWithInt = new ParentWithInt() { S = $"test at {DateTime.Now}", I = 1 };
-var parentWithGuid = new ParentWithGuid() { S = $"test at {DateTime.Now}", I = 1 };
-
+// initials maps for table names mainly
 FluentMapper.Initialize(config =>
     {
         config.AddMap(new IntMap());
@@ -66,102 +72,60 @@ FluentMapper.Initialize(config =>
         config.AddMap(new ChildMap());
         config.ForDommel();
     });
+
+// add this to allow the Guid to come back from the insert
 DommelMapper.AddSqlBuilder(typeof(SqlConnection), new GuidSqlServerSqlBuilder());
+
+
+var parentWithInt = new ParentWithInt() { S = $"test at {DateTime.Now}", I = 1 };
+var parentWithGuid = new ParentWithGuid() { S = $"test at {DateTime.Now}", I = 1 };
 
 var loop = 1;
 var childLoop = 10;
+var testDommel = true;
 if (args.Count() > 0)
     int.TryParse(args[0], out loop);
+if (args.Count() > 1 && bool.TryParse(args[1], out var testDapper))
+    testDommel = false;
 
+var deleteMe = new List<Guid>();
 
 for (int i = 0; i < loop; i++)
 {
-    // insertIntKeyDapper(connection, c);
-    // insertIntKeyDommel(connection, c);
-    insertGuidKeyDommel(connection, parentWithGuid);
-    // insertGuidDapper(connection, cGuid);
+    if (testDommel)
+    {
+        insertIntKeyDommel(connection, parentWithInt);
+        insertGuidKeyDommel(connection, parentWithGuid);
+        for (int j = 0; j < childLoop; j++)
+        {
+            insertChildFor(connection, parentWithGuid);
+        }
+        WriteLine($"Added {childLoop} kids");
+        deleteMe.Add(parentWithGuid.Id);
+    }
+    else
+    {
+        insertIntKeyDapper(connection, parentWithInt);
+        insertGuidKeyDapper(connection, parentWithGuid);
+    }
 }
 WriteLine($"Looped {loop} times");
-parentWithGuid.I = 123;
-connection.Update(parentWithGuid);
-WriteLine($"Updated {parentWithGuid.Id}");
 
-var x = connection.FirstOrDefault<ParentWithGuid>(p => p.Id == parentWithGuid.Id );
-WriteLine($"I is {x?.I}");
-
-for (int i = 0; i < childLoop; i++)
+if (testDommel)
 {
-    insertChildFor(connection,parentWithGuid);
-}
-WriteLine($"Added {childLoop} kids");
+    parentWithGuid.I = 123;
+    connection.Update(parentWithGuid);
+    WriteLine($"Updated {parentWithGuid.Id}");
 
-var combined = connection.FirstOrDefault<ParentWithGuid,Child,ParentWithGuid>( p => p.Id == parentWithGuid.Id );
-WriteLine($"Combined has {combined?.Children.Count} kids");
+    var x = connection.FirstOrDefault<ParentWithGuid>(p => p.Id == parentWithGuid.Id);
+    WriteLine($"For updated parent, I is {x?.I}");
 
+    // for this to work, the Child class must implement IEquatable
+    var parent = connection.FirstOrDefault<ParentWithGuid, Child, ParentWithGuid>(p => p.Id == parentWithGuid.Id);
+    WriteLine($"Parent has {parent?.Children.Count} kids");
+    WriteLine( JsonSerializer.Serialize(parent, new JsonSerializerOptions() { WriteIndented = true } ));
 
-var deleteMe = new Guid[] {parentWithGuid.Id};
-connection.DeleteMultiple<ParentWithGuid>(o => deleteMe.Contains(o.Id));
-WriteLine($"Deleted {parentWithGuid.Id}");
-
-//============================== classes
-public class GuidSqlServerSqlBuilder : SqlServerSqlBuilder
-{
-    public override string BuildInsert(Type type, string tableName, string[] columnNames, string[] paramNames)
-    {
-        return $"set nocount on insert into {tableName} ({string.Join(", ", columnNames)}) output inserted.Id values ({string.Join(", ", paramNames)})";
-    }
-}
-
-class ParentWithInt
-{
-    public int Id { get; set; }
-    public string S { get; set; } = "";
-    public int I { get; set; }
-}
-
-class ParentWithGuid : IEquatable<ParentWithGuid>
-{
-    public Guid Id { get; set; }
-    public string S { get; set; } = "";
-    public int I { get; set; }
-
-    public IList<Child> Children { get; set; } = new List<Child>();
-
-    public bool Equals(ParentWithGuid? other)
-    {
-        return Id == (other?.Id ?? Guid.Empty);
-    }
-}
-
-class Child : IEquatable<Child> {
-    public Guid Id { get; set; }
-    public Guid ParentWithGuidId { get; set; }
-    public string ChildName { get; set; } = "";
-
-    public bool Equals(Child? other)
-    {
-        return Id == (other?.Id ?? Guid.Empty);
-    }
-}
-
-class ChildMap : DommelEntityMap<Child>
-{
-    public ChildMap()
-    {
-        ToTable("Children");
-    }
-}
-class GuidMap : DommelEntityMap<ParentWithGuid>
-{
-    public GuidMap()
-    {
-        ToTable("GuidKey");
-    }
-}
-class IntMap : DommelEntityMap<ParentWithInt>
-{
-    public IntMap()
-    {
-        ToTable("IntKey");
-    }
+    deleteMe = deleteMe.Skip(1).ToList();
+    connection.DeleteMultiple<ParentWithGuid>(o => deleteMe.Contains(o.Id));
+    WriteLine($"Deleted all parent but first parent");
 }
