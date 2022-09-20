@@ -1,5 +1,8 @@
-﻿using System.Data.Common;
-using System.Data.SqlClient;
+﻿using System.Data;
+using System.Data.Common;
+using Microsoft.Data.SqlClient;
+using System.Diagnostics;
+using System.Text;
 using Microsoft.Extensions.Configuration;
 using Dapper;
 using Dapper.FluentMap;
@@ -17,7 +20,7 @@ void insertIntKeyDapper(DbConnection conn, ParentWithInt c)
 {
     var sql = "INSERT INTO IntKey (S,I) VALUES (@S,@I)";
 
-    var affectedRows = conn.Execute(sql, new { S = $"Dapper at {DateTime.Now}", c.I });
+    var affectedRows = conn.Execute(sql, new {S = $"Dapper at {DateTime.Now}", c.I});
 
     WriteLine($"Inserted {affectedRows} into IntKey");
 }
@@ -26,9 +29,63 @@ void insertGuidKeyDapper(DbConnection conn, ParentWithGuid c)
 {
     var sql = "INSERT INTO Guid (Id, S, I) VALUES (@Id, @S,@I)";
 
-    var affectedRows = conn.Execute(sql, new { Id = NewId.NextGuid(), S = $"Dapper at {DateTime.Now}", c.I });
+    var affectedRows = conn.Execute(sql, new {Id = NewId.NextGuid(), S = $"Dapper at {DateTime.Now}", c.I});
 
-    WriteLine($"Dapper Inserted {affectedRows} into GuidKey");
+    // WriteLine($"Dapper Inserted {affectedRows} into GuidKey");
+}
+
+void bulkInsertGuidKeyDapper(DbConnection conn, int count)
+{
+    var sql = new StringBuilder("INSERT INTO Guid (Id, S, I) VALUES");
+    var parms = new DynamicParameters();
+    for (var i = 0; i < count; i++)
+    {
+        sql.Append($"(@guid{i}, @s{i}, @i{i}),");
+        parms.Add($"@guid{i}", Guid.NewGuid(), DbType.Guid);
+        parms.Add($"@s{i}", $"It's {i}");
+        parms.Add($"@i{i}", i);
+    }
+
+    var affectedRows = conn.Execute(sql.ToString().Trim(','), parms);
+
+    WriteLine($"Dapper Bulk Inserted {affectedRows} into GuidKey");
+}
+
+void bulkInsert<T>(IDbConnection conn, string insert, IEnumerable<T> items, Action<DynamicParameters, T, int> append, IDbTransaction? trans = null, int chunkSize = 10)
+    where T : class
+{
+    var affectedRows = 0;
+    var i = 0;
+    var parts = insert.Split("VALUES (");
+    if (parts.Length < 2)
+    {
+        throw new Exception("Invalid insert statement");
+    }
+    
+    var sql = new StringBuilder($"{parts[0]} VALUES");
+    var parms = new DynamicParameters();
+    var values = $"({parts[1]},";
+    
+    foreach (var item in items)
+    {
+        append(parms, item, i);
+        sql.Append(string.Format(values, i));
+
+        if (++i < chunkSize)
+            continue;
+
+        conn.Execute(sql.ToString().Trim(','), parms, trans);
+        
+        sql.Clear();
+        sql.Append($"{parts[0]} VALUES");
+        parms = new DynamicParameters();
+        i = 0;
+    }
+
+    if (i > 0)
+    {
+        conn.Execute(sql.ToString().Trim(','), parms, trans);
+    }
 }
 
 void insertIntKeyDommel(DbConnection conn, ParentWithInt c)
@@ -51,34 +108,78 @@ void insertGuidKeyDommel(DbConnection conn, ParentWithGuid c)
 
 void insertChildFor(SqlConnection connection, ParentWithGuid parentWithGuid)
 {
-    var kid = new Child() { ParentWithGuidId = parentWithGuid.Id, ChildName = DateTime.Now.ToString() };
+    var kid = new Child() {ParentWithGuidId = parentWithGuid.Id, ChildName = DateTime.Now.ToString()};
     connection.Insert(kid);
 }
 
 //============================== main
+//============================== main
+//============================== main
+//============================== main
+
 var configuration = new ConfigurationBuilder()
-            .AddSharedDevSettings()
-            .AddJsonFile("appsettings.json", true, true)
-            .AddEnvironmentVariables()
-            .Build();
+    .AddSharedDevSettings()
+    .AddJsonFile("appsettings.json", true, true)
+    .AddEnvironmentVariables()
+    .Build();
 
 using var connection = new SqlConnection(configuration.GetConnectionString("SqlServer"));
+connection.Open();
 
 // initials maps for table names mainly
 FluentMapper.Initialize(config =>
-    {
-        config.AddMap(new IntMap());
-        config.AddMap(new GuidMap());
-        config.AddMap(new ChildMap());
-        config.ForDommel();
-    });
+{
+    config.AddMap(new IntMap());
+    config.AddMap(new GuidMap());
+    config.AddMap(new ChildMap());
+    config.ForDommel();
+});
 
 // add this to allow the Guid to come back from the insert
 DommelMapper.AddSqlBuilder(typeof(SqlConnection), new GuidSqlServerSqlBuilder());
 
 
-var parentWithInt = new ParentWithInt() { S = $"test at {DateTime.Now}", I = 1 };
-var parentWithGuid = new ParentWithGuid() { S = $"test at {DateTime.Now}", I = 1 };
+var items = new List<ParentWithGuid>();
+for (int i = 0; i < 500; i++)
+{
+    items.Add(new ParentWithGuid() {I = i, Id = NewId.NextGuid(), S = $"It is {i}"});
+}
+
+
+// bulkInsertGuidKeyDapper(connection, 10);
+
+var sw = Stopwatch.StartNew();
+foreach ( var i in items) {
+    insertGuidKeyDapper(connection, i);
+}
+WriteLine($"Inserts took {sw.ElapsedMilliseconds}ms");
+  
+    
+sw.Restart();
+bulkInsert(connection, "INSERT INTO Guid (Id, S, I) VALUES (@guid{0}, @s{0}, @i{0})", items, (parms, item, i) =>
+{
+    parms.Add($"@guid{i}", NewId.NextGuid(), DbType.Guid);
+    parms.Add($"@s{i}", item.S);
+    parms.Add($"@i{i}", item.I);
+}, null, 12);
+WriteLine($"Bulk insert no transaction took {sw.ElapsedMilliseconds}ms");
+
+var trans = connection.BeginTransaction();
+sw.Restart();
+bulkInsert(connection, "INSERT INTO Guid (Id, S, I) VALUES (@guid{0}, @s{0}, @i{0})", items, (parms, item, i) =>
+{
+    parms.Add($"@guid{i}", NewId.NextGuid(), DbType.Guid);
+    parms.Add($"@s{i}", item.S);
+    parms.Add($"@i{i}", item.I);
+}, trans, 12);
+trans.Commit();
+WriteLine($"Bulk insert with transaction took {sw.ElapsedMilliseconds}ms");
+
+
+return;
+
+var parentWithInt = new ParentWithInt() {S = $"test at {DateTime.Now}", I = 1};
+var parentWithGuid = new ParentWithGuid() {S = $"test at {DateTime.Now}", I = 1};
 
 var loop = 1;
 var childLoop = 10;
@@ -87,6 +188,30 @@ if (args.Count() > 0)
     int.TryParse(args[0], out loop);
 if (args.Count() > 1 && bool.TryParse(args[1], out var testDapper))
     testDommel = false;
+
+var s = "select I, 'last' as last FROM GuidKey";
+var result = await connection.QueryAsync<ParentWithGuid, ParentWithGuid, ParentWithGuid>(s, (p1, p2) =>
+{
+    p1.S = "this works!";
+    return p1;
+}, splitOn: "last");
+
+WriteLine("Results #1!");
+foreach (var r in result)
+{
+    WriteLine($"   {r.S}, {r.I}");
+}
+
+// this gets The type 'String' is not supported for SQL literals.
+var sql = "SELECT '{=clientId}' as ClientId";
+var expiredMessages = await connection.QueryAsync<ParentWithGuid>(sql, new {clientId = "123456"});
+WriteLine("Results!");
+foreach (var r in expiredMessages)
+{
+    WriteLine($"   {r}");
+}
+
+return;
 
 var deleteMe = new List<Guid>();
 
@@ -100,6 +225,7 @@ for (int i = 0; i < loop; i++)
         {
             insertChildFor(connection, parentWithGuid);
         }
+
         WriteLine($"Added {childLoop} kids");
         deleteMe.Add(parentWithGuid.Id);
     }
@@ -109,6 +235,7 @@ for (int i = 0; i < loop; i++)
         insertGuidKeyDapper(connection, parentWithGuid);
     }
 }
+
 WriteLine($"Looped {loop} times");
 
 if (testDommel)
@@ -123,7 +250,7 @@ if (testDommel)
     // for this to work, the Child class must implement IEquatable
     var parent = connection.FirstOrDefault<ParentWithGuid, Child, ParentWithGuid>(p => p.Id == parentWithGuid.Id);
     WriteLine($"Parent has {parent?.Children.Count} kids");
-    WriteLine( JsonSerializer.Serialize(parent, new JsonSerializerOptions() { WriteIndented = true } ));
+    WriteLine(JsonSerializer.Serialize(parent, new JsonSerializerOptions() {WriteIndented = true}));
 
     deleteMe = deleteMe.Skip(1).ToList();
     connection.DeleteMultiple<ParentWithGuid>(o => deleteMe.Contains(o.Id));
