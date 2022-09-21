@@ -1,5 +1,6 @@
 ﻿using System.Collections.Concurrent;
 using System.Data;
+using System.Data.Common;
 using System.Text;
 using Microsoft.Data.SqlClient;
 using Dapper;
@@ -25,8 +26,11 @@ public sealed class DbConnectionEx : IDisposable
     private CustomDbProfiler? _profiler;
 
     /// <summary>
-    ///     used for master db connections
+    /// used for master db connections
     /// </summary>
+    /// <param name="options">connection options</param>
+    /// <param name="logger">Logger for retry policy</param>
+    /// <param name="retryPolicy">Non-default retry policy</param>
     public DbConnectionEx(IOptions<DbOptions> options, ILogger? logger = null, AsyncRetryPolicy? retryPolicy = null)
     {
         _traceFile = options.Value.TraceFile;
@@ -36,11 +40,12 @@ public sealed class DbConnectionEx : IDisposable
     }
 
     /// <summary>
-    ///     used for client db connections
+    /// used for client db connections
     /// </summary>
-    /// <param name="options"></param>
+    /// <param name="options">connection options</param>
     /// <param name="clientUId"></param>
-    /// <param name="logger"></param>
+    /// <param name="logger">Logger for retry policy</param>
+    /// <param name="retryPolicy">Non-default retry policy</param>
     public DbConnectionEx(IOptions<DbOptions> options, string clientUId, ILogger? logger = null, AsyncRetryPolicy? retryPolicy = null)
     {
         _traceFile = options.Value.TraceFile;
@@ -76,12 +81,12 @@ public sealed class DbConnectionEx : IDisposable
     /// <summary>
     /// SQL Server connection factory that uses System.Data.Common.
     /// </summary>
-    public class MySqlServerDbConnectionFactory : IDbConnectionFactory
+    private class SqlServerDbConnectionFactory : IDbConnectionFactory
     {
         private readonly string _connectionString;
 
         /// <param name="connectionString"></param>
-        public MySqlServerDbConnectionFactory(string connectionString)
+        public SqlServerDbConnectionFactory(string connectionString)
         {
             _connectionString = connectionString;
         }
@@ -93,14 +98,14 @@ public sealed class DbConnectionEx : IDisposable
     }
 
 
-    private System.Data.Common.DbConnection NewConnection(string connectionString)
+    private DbConnection NewConnection(string connectionString)
     {
         if (string.IsNullOrEmpty(_traceFile))
             return new SqlConnection(connectionString);
         else
         {
             _profiler = new CustomDbProfiler();
-            var factory = new MySqlServerDbConnectionFactory(connectionString);
+            var factory = new SqlServerDbConnectionFactory(connectionString);
             return ProfiledDbConnectionFactory.New(factory, _profiler);
         }
     }
@@ -119,7 +124,7 @@ public sealed class DbConnectionEx : IDisposable
         return clients;
     }
 
-    public System.Data.Common.DbConnection Connection { get; }
+    public DbConnection Connection { get; }
 
     private string ConnectionString { get; }
 

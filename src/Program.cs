@@ -1,5 +1,4 @@
 ﻿using System.Data;
-using System.Data.Common;
 using Microsoft.Data.SqlClient;
 using System.Diagnostics;
 using System.Text;
@@ -12,11 +11,16 @@ using MassTransit;
 using static System.Console;
 using Seekatar.Tools;
 using System.Text.Json;
+using Loyal.Core.Database;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Serilog;
 
 #pragma warning disable CS8321 // unused fn
 
 //============================== worker fns
-void insertIntKeyDapper(DbConnection conn, ParentWithInt c)
+void insertIntKeyDapper(IDbConnection conn, ParentWithInt c)
 {
     var sql = "INSERT INTO IntKey (S,I) VALUES (@S,@I)";
 
@@ -25,7 +29,7 @@ void insertIntKeyDapper(DbConnection conn, ParentWithInt c)
     WriteLine($"Inserted {affectedRows} into IntKey");
 }
 
-void insertGuidKeyDapper(DbConnection conn, ParentWithGuid c)
+void insertGuidKeyDapper(IDbConnection conn, ParentWithGuid c)
 {
     var sql = "INSERT INTO Guid (Id, S, I) VALUES (@Id, @S,@I)";
 
@@ -34,7 +38,7 @@ void insertGuidKeyDapper(DbConnection conn, ParentWithGuid c)
     // WriteLine($"Dapper Inserted {affectedRows} into GuidKey");
 }
 
-void bulkInsertGuidKeyDapper(DbConnection conn, int count)
+void bulkInsertGuidKeyDapper(IDbConnection conn, int count)
 {
     var sql = new StringBuilder("INSERT INTO Guid (Id, S, I) VALUES");
     var parms = new DynamicParameters();
@@ -88,7 +92,7 @@ void bulkInsert<T>(IDbConnection conn, string insert, IEnumerable<T> items, Acti
     }
 }
 
-void insertIntKeyDommel(DbConnection conn, ParentWithInt c)
+void insertIntKeyDommel(IDbConnection conn, ParentWithInt c)
 {
     var key = conn.Insert(c);
 
@@ -97,7 +101,7 @@ void insertIntKeyDommel(DbConnection conn, ParentWithInt c)
     WriteLine($"Inserted key to IntKey is {key}");
 }
 
-void insertGuidKeyDommel(DbConnection conn, ParentWithGuid c)
+void insertGuidKeyDommel(IDbConnection conn, ParentWithGuid c)
 {
     c.S = $"Dommel at {DateTime.Now}";
     var key = conn.Insert(c);
@@ -106,7 +110,7 @@ void insertGuidKeyDommel(DbConnection conn, ParentWithGuid c)
     WriteLine($"Inserted key is to GuidKey is {key}");
 }
 
-void insertChildFor(SqlConnection connection, ParentWithGuid parentWithGuid)
+void insertChildFor(IDbConnection connection, ParentWithGuid parentWithGuid)
 {
     var kid = new Child() {ParentWithGuidId = parentWithGuid.Id, ChildName = DateTime.Now.ToString()};
     connection.Insert(kid);
@@ -117,14 +121,41 @@ void insertChildFor(SqlConnection connection, ParentWithGuid parentWithGuid)
 //============================== main
 //============================== main
 
+// add IConfiguration
 var configuration = new ConfigurationBuilder()
     .AddSharedDevSettings()
     .AddJsonFile("appsettings.json", true, true)
     .AddEnvironmentVariables()
     .Build();
 
-using var connection = new SqlConnection(configuration.GetConnectionString("SqlServer"));
-connection.Open();
+// add Serilog
+var serviceCollection = new ServiceCollection();
+Log.Logger = new LoggerConfiguration()
+    .ReadFrom
+    .Configuration(configuration)
+    .CreateLogger();
+
+serviceCollection.AddLogging(configure => configure.AddSerilog());
+var provider = serviceCollection.BuildServiceProvider();
+var logger = provider.GetService<ILogger<DbConnectionEx>>();
+if (logger is null)
+{
+    using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+    logger = loggerFactory.CreateLogger<DbConnectionEx>();
+    if (logger is null) throw new Exception("Can't create logger");
+}
+
+
+
+
+var ioptions = Options.Create(new DbOptions()
+{
+    MasterConnectionString = configuration.GetConnectionString("SqlServer")
+});
+
+using var dbconnection = new DbConnectionEx(ioptions);
+var connection = dbconnection.Connection;
+
 
 // initials maps for table names mainly
 FluentMapper.Initialize(config =>

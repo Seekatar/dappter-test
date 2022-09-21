@@ -1,11 +1,7 @@
 using Polly;
-using System;
 using System.Data.Common;
 using Microsoft.Data.SqlClient;
-using System.Linq;
-using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using Polly.Contrib.WaitAndRetry;
 using Polly.Retry;
 
 // largely from https://github.com/azurevoodoo/AzureSQLTransientHandling
