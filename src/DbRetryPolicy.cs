@@ -1,136 +1,271 @@
 using Polly;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Polly.Retry;
 
-// largely from https://github.com/azurevoodoo/AzureSQLTransientHandling
 namespace Loyal.Core.Database;
 
+/// <summary>
+/// Helper for retrying database operations using Polly.
+/// </summary>
+/// <remarks>
+/// Be aware if you use ConnectRetryCount in your connection string, this will be in addition to retries here.
+/// </remarks>
 public static class DbRetryPolicyFactory
 {
-    private const int SqlRetryCount = 4;
+    // This method is taken from EFCore code:
+    // https://raw.githubusercontent.com/aspnet/EntityFrameworkCore/master/src/EFCore.SqlServer/Storage/Internal/SqlServerTransientExceptionDetector.cs
+    // It is occasionally updated, so you may diff this against the original once in a while.
+    // Many of the Bloggers and retry code use this from EF Core retry logic that they use when _executing_ SQL (not connecting)
+    // In EF code, I didn't see any retries around opening a connection, it's even outside of a try/catch block in ExecuteCommand
+    private static bool EFCoreShouldRetryOn(Exception? ex)
+    {
+        if (ex is SqlException sqlException)
+        {
+            foreach (SqlError err in sqlException.Errors)
+            {
+                switch (err.Number)
+                {
+                    // SQL Error Code: 49920
+                    // Cannot process request. Too many operations in progress for subscription "%ld".
+                    // The service is busy processing multiple requests for this subscription.
+                    // Requests are currently blocked for resource optimization. Query sys.dm_operation_status for operation status.
+                    // Wait until pending requests are complete or delete one of your pending requests and retry your request later.
+                    case 49920:
+                    // SQL Error Code: 49919
+                    // Cannot process create or update request. Too many create or update operations in progress for subscription "%ld".
+                    // The service is busy processing multiple create or update requests for your subscription or server.
+                    // Requests are currently blocked for resource optimization. Query sys.dm_operation_status for pending operations.
+                    // Wait till pending create or update requests are complete or delete one of your pending requests and
+                    // retry your request later.
+                    case 49919:
+                    // SQL Error Code: 49918
+                    // Cannot process request. Not enough resources to process request.
+                    // The service is currently busy.Please retry the request later.
+                    case 49918:
+                    // SQL Error Code: 41839
+                    // Transaction exceeded the maximum number of commit dependencies.
+                    case 41839:
+                    // SQL Error Code: 41325
+                    // The current transaction failed to commit due to a serializable validation failure.
+                    case 41325:
+                    // SQL Error Code: 41305
+                    // The current transaction failed to commit due to a repeatable read validation failure.
+                    case 41305:
+                    // SQL Error Code: 41302
+                    // The current transaction attempted to update a record that has been updated since the transaction started.
+                    case 41302:
+                    // SQL Error Code: 41301
+                    // Dependency failure: a dependency was taken on another transaction that later failed to commit.
+                    case 41301:
+                    // SQL Error Code: 40613
+                    // Database XXXX on server YYYY is not currently available. Please retry the connection later.
+                    // If the problem persists, contact customer support, and provide them the session tracing ID of ZZZZZ.
+                    case 40613:
+                    // SQL Error Code: 40501
+                    // The service is currently busy. Retry the request after 10 seconds. Code: (reason code to be decoded).
+                    case 40501:
+                    // SQL Error Code: 40197
+                    // The service has encountered an error processing your request. Please try again.
+                    case 40197:
+                    // SQL Error Code: 20041
+                    // Transaction rolled back. Could not execute trigger. Retry your transaction.
+                    case 20041:
+                    // SQL Error Code: 17197
+                    // Login failed due to timeout; the connection has been closed. This error may indicate heavy server load.
+                    // Reduce the load on the server and retry login.
+                    case 17197:
+                    // SQL Error Code: 14355
+                    // The MSSQLServerADHelper service is busy. Retry this operation later.
+                    case 14355:
+                    // SQL Error Code: 10936
+                    // Resource ID : %d. The request limit for the elastic pool is %d and has been reached.
+                    // See 'http://go.microsoft.com/fwlink/?LinkId=267637' for assistance.
+                    case 10936:
+                    // SQL Error Code: 10929
+                    // Resource ID: %d. The %s minimum guarantee is %d, maximum limit is %d and the current usage for the database is %d.
+                    // However, the server is currently too busy to support requests greater than %d for this database.
+                    // For more information, see http://go.microsoft.com/fwlink/?LinkId=267637. Otherwise, please try again.
+                    case 10929:
+                    // SQL Error Code: 10928
+                    // Resource ID: %d. The %s limit for the database is %d and has been reached. For more information,
+                    // see http://go.microsoft.com/fwlink/?LinkId=267637.
+                    case 10928:
+                    // SQL Error Code: 10922
+                    // %ls failed. Rerun the statement.
+                    case 10922:
+                    // SQL Error Code: 10060
+                    // A network-related or instance-specific error occurred while establishing a connection to SQL Server.
+                    // The server was not found or was not accessible. Verify that the instance name is correct and that SQL Server
+                    // is configured to allow remote connections. (provider: TCP Provider, error: 0 - A connection attempt failed
+                    // because the connected party did not properly respond after a period of time, or established connection failed
+                    // because connected host has failed to respond.)"}
+                    case 10060:
+                    // SQL Error Code: 10054
+                    // A transport-level error has occurred when sending the request to the server.
+                    // (provider: TCP Provider, error: 0 - An existing connection was forcibly closed by the remote host.)
+                    case 10054:
+                    // SQL Error Code: 10053
+                    // A transport-level error has occurred when receiving results from the server.
+                    // An established connection was aborted by the software in your host machine.
+                    case 10053:
+                    // SQL Error Code: 9515
+                    // An XML schema has been altered or dropped, and the query plan is no longer valid. Please rerun the query batch.
+                    case 9515:
+                    // SQL Error Code: 8651
+                    // Could not perform the operation because the requested memory grant was not available in resource pool '%ls' (%ld).
+                    // Rerun the query, reduce the query load, or check resource governor configuration setting.
+                    case 8651:
+                    // SQL Error Code: 8645
+                    // A timeout occurred while waiting for memory resources to execute the query in resource pool '%ls' (%ld). Rerun the query.
+                    case 8645:
+                    // SQL Error Code: 8628
+                    // A time out occurred while waiting to optimize the query. Rerun the query.
+                    case 8628:
+                    // SQL Error Code: 4221
+                    // Login to read-secondary failed due to long wait on 'HADR_DATABASE_WAIT_FOR_TRANSITION_TO_VERSIONING'.
+                    // The replica is not available for login because row versions are missing for transactions that were in-flight
+                    // when the replica was recycled. The issue can be resolved by rolling back or committing the active transactions
+                    // on the primary replica. Occurrences of this condition can be minimized by avoiding long write transactions on the primary.
+                    case 4221:
+                    // SQL Error Code: 4060
+                    // Cannot open database "%.*ls" requested by the login. The login failed.
+                    case 4060:
+                    // SQL Error Code: 3966
+                    // Transaction is rolled back when accessing version store. It was earlier marked as victim when the version store
+                    // was shrunk due to insufficient space in tempdb. This transaction was marked as a victim earlier because it may need
+                    // the row version(s) that have already been removed to make space in tempdb. Retry the transaction
+                    case 3966:
+                    // SQL Error Code: 3960
+                    // Snapshot isolation transaction aborted due to update conflict. You cannot use snapshot isolation to access table '%.*ls'
+                    // directly or indirectly in database '%.*ls' to update, delete, or insert the row that has been modified or deleted
+                    // by another transaction. Retry the transaction or change the isolation level for the update/delete statement.
+                    case 3960:
+                    // SQL Error Code: 3935
+                    // A FILESTREAM transaction context could not be initialized. This might be caused by a resource shortage. Retry the operation.
+                    case 3935:
+                    // SQL Error Code: 1807
+                    // Could not obtain exclusive lock on database 'model'. Retry the operation later.
+                    case 1807:
+                    // SQL Error Code: 1221
+                    // The Database Engine is attempting to release a group of locks that are not currently held by the transaction.
+                    // Retry the transaction. If the problem persists, contact your support provider.
+                    case 1221:
+                    // SQL Error Code: 1205
+                    // Deadlock
+                    case 1205:
+                    // SQL Error Code: 1204
+                    // The instance of the SQL Server Database Engine cannot obtain a LOCK resource at this time. Rerun your statement
+                    // when there are fewer active users. Ask the database administrator to check the lock and memory configuration for
+                    // this instance, or to check for long-running transactions.
+                    case 1204:
+                    // SQL Error Code: 1203
+                    // Process ID %d attempted to unlock a resource it does not own: %.*ls. Retry the transaction, because this error
+                    // may be caused by a timing condition. If the problem persists, contact the database administrator.
+                    case 1203:
+                    // SQL Error Code: 997
+                    // A connection was successfully established with the server, but then an error occurred during the login process.
+                    // (provider: Named Pipes Provider, error: 0 - Overlapped I/O operation is in progress)
+                    case 997:
+                    // SQL Error Code: 921
+                    // Database '%.*ls' has not been recovered yet. Wait and try again.
+                    case 921:
+                    // SQL Error Code: 669
+                    // The row object is inconsistent. Please rerun the query.
+                    case 669:
+                    // SQL Error Code: 617
+                    // Descriptor for object ID %ld in database ID %d not found in the hash table during attempt to un-hash it.
+                    // A work table is missing an entry. Rerun the query. If a cursor is involved, close and reopen the cursor.
+                    case 617:
+                    // SQL Error Code: 601
+                    // Could not continue scan with NOLOCK due to data movement.
+                    case 601:
+                    // SQL Error Code: 233
+                    // The client was unable to establish a connection because of an error during connection initialization process before login.
+                    // Possible causes include the following: the client tried to connect to an unsupported version of SQL Server;
+                    // the server was too busy to accept new connections; or there was a resource limitation (insufficient memory or maximum
+                    // allowed connections) on the server. (provider: TCP Provider, error: 0 - An existing connection was forcibly closed by
+                    // the remote host.)
+                    case 233:
+                    // SQL Error Code: 121
+                    // The semaphore timeout period has expired
+                    case 121:
+                    // SQL Error Code: 64
+                    // A connection was successfully established with the server, but then an error occurred during the login process.
+                    // (provider: TCP Provider, error: 0 - The specified network name is no longer available.)
+                    case 64:
+                    // DBNETLIB Error Code: 20
+                    // The instance of SQL Server you attempted to connect to does not support encryption.
+                    case 20:
+                        return true;
+                    // This exception can be thrown even if the operation completed successfully, so it's safer to let the application fail.
+                    // DBNETLIB Error Code: -2
+                    // Timeout expired. The timeout period elapsed prior to completion of the operation or the server is not responding. The statement has been terminated.
+                    //case -2:
+                }
+            }
 
-    
-    // questionable transient errors
-    // -2 timeout? Cadru
-    private const int SqlErrorInstanceDoesNotSupportEncryption = 20;
-    private const int SqlErrorServiceRequestProcessFail = 40540; // only Voodoo uses this
-    private const int SqlErrorServiceExperiencingAProblem = 40545; // only Voodoo uses this
-    private const int SqlErrorOperationInProgress = 40627; // only Voodoo uses this
-    
-    // errors
-    private const int SqlErrorConnectedButLoginFailed = 64;
-    private const int SqlErrorUnableToEstablishConnection = 233;
-    
-    // Not found
-    private const int SqlErrorTransportLevelErrorReceivingResult = 10053;
-    
-    private const int SqlErrorTransportLevelErrorWhenSendingRequestToServer = 10054;
-    private const int SqlErrorNetworkRelatedErrorDuringConnect = 10060;
-    
-    // resource limits
-    private const int SqlErrorDatabaseLimitReached = 10928;
-    private const int SqlErrorResourceLimitReached = 10929;
-    
-    // transient per MS
-    private const int SqlErrorServiceErrorEncountered = 40197;
-    private const int SqlErrorServiceBusy = 40501;
-    private const int SqlErrorDatabaseUnavailable = 40613;
-    // 4060 login
-    // 4221 login
-    // 49918
-    // 49919
-    // 49920
-    // resource/elastic per MS
-    // 10928
-    // 10929
-    // xaction releast
-    // 40549 long running xaction
-    // 40550 too many locks Cadru, vanny, not MS
-    
-    // per cadru, gist & devMobile
-    // 20 encryption not supported
-    // 64 connection login
-    // 233 connection
-    // 1205 deadlock
-    // 10053 network related
-    // 10054 network
-    // 10060 network
-    // 11001 network
-    // 41301
-    // 41302
-    // 41305
-    // 41325
-    // 41839
-    
-    
+            return false;
+        }
+
+        return ex is TimeoutException;
+    }
 
     private static bool ConnectRetryableError(SqlException exception)
     {
-        return exception.Errors.OfType<SqlError>().Any(ConnectRetryableError);
+        return EFCoreShouldRetryOn(exception)
+               || exception.Errors.OfType<SqlError>().Any(AdditionalSqlRetryableError)
+               || exception.Errors.OfType<SqlError>().Any(AdditionalConnectRetryableError);
     }
 
     private static bool SqlRetryableError(SqlException exception)
     {
-        return exception.Errors.OfType<SqlError>().Any(SqlRetryableError);
+        return EFCoreShouldRetryOn(exception)
+               || exception.Errors.OfType<SqlError>().Any(AdditionalSqlRetryableError);
     }
 
-    private static bool ConnectRetryableError(SqlError error)
+    private static bool AdditionalConnectRetryableError(SqlError error)
     {
-        switch (error.Number)
+        return error.Number switch
         {
-            case SqlErrorOperationInProgress:
-            case SqlErrorDatabaseUnavailable:
-            case SqlErrorServiceExperiencingAProblem:
-            case SqlErrorServiceRequestProcessFail:
-            case SqlErrorServiceBusy:
-            case SqlErrorServiceErrorEncountered:
-            case SqlErrorResourceLimitReached:
-            case SqlErrorDatabaseLimitReached:
-            case SqlErrorNetworkRelatedErrorDuringConnect:
-            case SqlErrorTransportLevelErrorWhenSendingRequestToServer:
-            case SqlErrorTransportLevelErrorReceivingResult:
-            case SqlErrorUnableToEstablishConnection:
-            case SqlErrorConnectedButLoginFailed:
-            case SqlErrorInstanceDoesNotSupportEncryption:
-                return true;
-
-            default:
-                return false;
-        }
+            47073 or // temp for testing can't access private SQL from public network (no VPN)
+            // NOTE see the EFCore code below that says this should _not_ be retried, but that
+            // code is for commands. For connections, we are retrying.
+            // Timeout expired. The timeout period elapsed prior to completion of the operation or the server is not responding. The statement has been terminated.
+            -2 => true,
+            _ => false
+        };
     }
-   
-    private static bool SqlRetryableError(SqlError error)
+
+    private static bool AdditionalSqlRetryableError(SqlError error)
     {
-        switch (error.Number)
+        return error.Number switch
         {
-            case SqlErrorOperationInProgress:
-            case SqlErrorDatabaseUnavailable:
-            case SqlErrorServiceExperiencingAProblem:
-            case SqlErrorServiceRequestProcessFail:
-            case SqlErrorServiceBusy:
-            case SqlErrorServiceErrorEncountered:
-            case SqlErrorResourceLimitReached:
-            case SqlErrorDatabaseLimitReached:
-            case SqlErrorNetworkRelatedErrorDuringConnect:
-            case SqlErrorTransportLevelErrorWhenSendingRequestToServer:
-            case SqlErrorTransportLevelErrorReceivingResult:
-            case SqlErrorUnableToEstablishConnection:
-            case SqlErrorConnectedButLoginFailed:
-            case SqlErrorInstanceDoesNotSupportEncryption:
-                return true;
-
-            default:
-                return false;
-        }
+            // SQL Error Code: 11001
+            // Resource ID: %d. The %s minimum guarantee is %d, maximum limit is %d and
+            // the current usage for the database is %d. However, the server is currently
+            // too busy to support requests greater than %d for this database
+            11001 => true,
+            _ => false
+        };
     }
 
+    /// <summary>
+    /// Create your own retry policy for connecting to SQL Server.
+    /// </summary>
+    /// <param name="retryCount">number of times to retry</param>
+    /// <param name="initialTimeoutSec">first timeout, then will double on each retry</param>
+    /// <param name="maxTimeoutSec">max timeout limit (if the same as initial, constant timeout)</param>
+    /// <returns>Policy for use in OpenWithRetryAsync</returns>
     public static AsyncRetryPolicy CreateConnectRetryPolicy(int retryCount = 4, int initialTimeoutSec = 5, int maxTimeoutSec = 60)
     {
+        if (initialTimeoutSec < 2) throw new ArgumentOutOfRangeException(nameof(initialTimeoutSec), "Must be at least 2 seconds");
+        
         return Policy
-            // .Handle<TimeoutException>() // others don't use this, only this one
-            .Handle<SqlException>(ConnectRetryableError)
+            .Handle<TimeoutException>()
+            .Or<SqlException>(ConnectRetryableError)
             .WaitAndRetryAsync(
                 retryCount,
                 // get timespan for delay
@@ -138,31 +273,63 @@ public static class DbRetryPolicyFactory
                 // on retry
                 (exception, timeSpan, retries, context) =>
                 {
-                    if (context["logger"] is not ILogger logger)
-                        return;
-                    logger.LogDebug(exception, "SQL Retry of {retries}/{retryCount} failed", retries, retryCount);
-                    
-                    if (retryCount != retries)
-                        return;
-
-                    // only log if the final retry fails
-                    logger.LogError(exception, "SQL Retry of {retries}/{retryCount} failed", retries, retryCount);
+                    LogRetry(exception, context, retryCount, retries);
                 });
-    } 
-    
+    }
+
+    /// <summary>
+    /// Create your own retry policy for executing a SQL Server query or command.
+    /// </summary>
+    /// <param name="retryCount">number of times to retry</param>
+    /// <param name="initialTimeoutSec">first timeout, then will double on each retry</param>
+    /// <param name="maxTimeoutSec">max timeout limit (if the same as initial, constant timeout)</param>
+    /// <returns>Policy for use in RunWithRetryAsync</returns>
     public static AsyncRetryPolicy CreateSqlRetryPolicy(int retryCount = 4, int initialTimeoutSec = 5, int maxTimeoutSec = 60)
     {
+        if (initialTimeoutSec < 2) throw new ArgumentOutOfRangeException(nameof(initialTimeoutSec), "Must be at least 2 seconds");
+        
         return Policy
             .Handle<TimeoutException>()
             .Or<SqlException>(SqlRetryableError)
-            .WaitAndRetryAsync(retryCount, (attempt) =>
-                TimeSpan.FromSeconds(Math.Min(maxTimeoutSec, Math.Pow(initialTimeoutSec, attempt)))
-            );        
+            .WaitAndRetryAsync(
+                retryCount,
+                // get timespan for delay
+                (attempt) => TimeSpan.FromSeconds(Math.Min(maxTimeoutSec, Math.Pow(initialTimeoutSec, attempt))),
+                // on retry
+                (exception, timeSpan, retries, context) =>
+                {
+                    LogRetry(exception, context, retryCount, retries);
+                });
     }
 
+    private static void LogRetry(Exception exception, Context context, int retryCount, int retries)
+    {
+        // called _before_ each retry
+        if (context["logger"] is not ILogger logger)
+            return;
+        if (retryCount != retries)
+            logger.LogDebug("SQL Retry of {retries}/{retryCount} failed {exception}", retries, retryCount, exception.Message );
+        else
+            logger.LogError(exception, "About to do last SQL Retry after failure"); // final retry, but may succeed
+    }
+
+    /// <summary>
+    /// The default retry policy for connecting to SQL Server. (4 retries, 5, 10, 20, 40 seconds)
+    /// </summary>
     public static AsyncRetryPolicy DefaultConnectRetryPolicy { get; set; } = CreateConnectRetryPolicy();
+
+    /// <summary>
+    /// The default retry policy for connecting to SQL Server. (4 retries, 5, 10, 20, 40 seconds)
+    /// </summary>
     public static AsyncRetryPolicy DefaultSqlRetryPolicy { get; set; } = CreateSqlRetryPolicy();
-    
+
+    /// <summary>
+    /// Open a connection to SQL Server with retry in the event of transient SQL error.
+    /// </summary>
+    /// <param name="conn">The DbConnection</param>
+    /// <param name="logger">optional logger for logging final retry (all in debug)</param>
+    /// <param name="retryPolicy">optional override policy</param>
+    /// <returns>The open connection</returns>
     public static async Task<DbConnection> OpenWithRetryAsync(this DbConnection conn, ILogger? logger = null, AsyncRetryPolicy? retryPolicy = null)
     {
         retryPolicy ??= DefaultConnectRetryPolicy;
@@ -170,19 +337,29 @@ public static class DbRetryPolicyFactory
         if (logger is not null)
         {
             context["logger"] = logger;
-        } 
-        await retryPolicy.ExecuteAsync((_) => conn.OpenAsync(), context).ConfigureAwait(false);;
+        }
+
+        await retryPolicy.ExecuteAsync((_) => conn.OpenAsync(), context).ConfigureAwait(false);
+        ;
         return conn;
     }
-    
-    public static async Task<T> RunWithRetryAsync<T>(this DbConnection conn, Func<Task<T>> runSql, ILogger? logger = null, AsyncRetryPolicy? retryPolicy = null) 
+
+    /// <summary>
+    /// Runs a command with retry in the event of transient SQL error.
+    /// </summary>
+    /// <param name="conn">The DbConnection</param>
+    /// <param name="runSql">func to run, Dapper, Dommel, etc.</param>
+    /// <param name="logger">optional logger for logging final retry (all in debug)</param>
+    /// <param name="retryPolicy">optional override policy</param>
+    /// <returns>TResult</returns>
+    public static async Task<TResult> RunWithRetryAsync<TResult>(this DbConnection conn, Func<Task<TResult>> runSql, ILogger? logger = null, AsyncRetryPolicy? retryPolicy = null)
     {
         retryPolicy ??= DefaultSqlRetryPolicy;
         var context = new Dictionary<string, object>();
         if (logger is not null)
         {
             context["logger"] = logger;
-        } 
+        }
 
         return await retryPolicy.ExecuteAsync((_) => runSql(), context).ConfigureAwait(false);
     }
