@@ -159,7 +159,7 @@ public sealed class DbConnectionEx : IDisposable
     {
         if (Connection.State != ConnectionState.Open)
         {
-            Connection.OpenWithRetryAsync(logger, retryPolicy).Wait();
+            Connection.Open(); //  .OpenWithRetryAsync(logger, retryPolicy).Wait();
         }
     }
 }

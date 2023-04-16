@@ -1,4 +1,5 @@
-﻿using System.Data;
+﻿using System.ComponentModel.DataAnnotations;
+using System.Data;
 using Microsoft.Data.SqlClient;
 using System.Diagnostics;
 using System.Text;
@@ -11,11 +12,14 @@ using MassTransit;
 using static System.Console;
 using Seekatar.Tools;
 using System.Text.Json;
+using Dapper.FluentMap.Dommel.Mapping;
 using Loyal.Core.Database;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Newtonsoft.Json;
 using Serilog;
+using JsonSerializer = System.Text.Json.JsonSerializer;
 
 #pragma warning disable CS8321 // unused fn
 
@@ -159,7 +163,7 @@ if (!logger.IsEnabled(LogLevel.Debug))
 }
 
 logger.LogInformation("Connecting to server...");
-using var dbconnection = new DbConnectionEx(ioptions, logger, DbRetryPolicyFactory.CreateConnectRetryPolicy(4, 2, 5));
+using var dbconnection = new DbConnectionEx(ioptions, logger); // , DbRetryPolicyFactory.CreateConnectRetryPolicy(4, 2, 5));
 var connection = dbconnection.Connection;
 logger.LogInformation("   ...connected");
 
@@ -177,7 +181,7 @@ if (args.Count() > 0 && args[0] == "bulk")
     });
 
     // add this to allow the Guid to come back from the insert
-    DommelMapper.AddSqlBuilder(typeof(SqlConnection), new GuidSqlServerSqlBuilder());
+    // DommelMapper.AddSqlBuilder(typeof(SqlConnection), new GuidSqlServerSqlBuilder());
 
 
     var items = new List<ParentWithGuid>();
@@ -285,9 +289,9 @@ if (args.Count() > 0 && args[0] == "bulk")
         WriteLine($"For updated parent, I is {x?.I}");
 
         // for this to work, the Child class must implement IEquatable
-        var parent = connection.FirstOrDefault<ParentWithGuid, Child, ParentWithGuid>(p => p.Id == parentWithGuid.Id);
-        WriteLine($"Parent has {parent?.Children.Count} kids");
-        WriteLine(JsonSerializer.Serialize(parent, new JsonSerializerOptions() { WriteIndented = true }));
+        // var parent = connection.FirstOrDefault<ParentWithGuid, Child, ParentWithGuid>(p => p.Id == parentWithGuid.Id);
+        // WriteLine($"Parent has {parent?.Children.Count} kids");
+        // WriteLine(JsonSerializer.Serialize(parent, new JsonSerializerOptions() { WriteIndented = true }));
 
         deleteMe = deleteMe.Skip(1).ToList();
         connection.DeleteMultiple<ParentWithGuid>(o => deleteMe.Contains(o.Id));
@@ -297,9 +301,54 @@ if (args.Count() > 0 && args[0] == "bulk")
     WriteLine("Waiting to press a key");
     ReadKey();
     WriteLine("Running query...");
+    FluentMapper.Initialize(config =>
+    {
+        config.AddMap(new ClientMap());
+        config.ForDommel();
+    });
+
+    var client = new Client {
+        ClientId = 100,
+        Name = "Test",
+        Active = true,
+        ExternalClientId = 100,
+        Cuid = "'123'",
+        DatabaseName = "test",
+        ApiKey = "test",
+    };
+    connection.Insert(client);
 
     var sql = "SELECT @@version as childName";
     var c = (await connection.QueryAsync<Child>(sql)).FirstOrDefault();
 
     WriteLine($"Results! {c?.ChildName ?? "<null>"}");
+
+
 }
+
+    public class Client
+    {
+        [Key]
+        public int ClientId { get; set; }
+        public string Name { get; set; }
+        public bool Active { get; set; }
+        public int ExternalClientId { get; set; }
+        public string DatabaseName { get; set; }
+        [JsonIgnore]
+        public string ApiKey { get; set; }
+        public string Cuid { get; set; }
+        public bool Enable2Fa { get; set; }
+        public List<string> Roles { get; set; }
+        [System.Text.Json.Serialization.JsonIgnore]
+        [JsonIgnore]
+        public string AuditEntityId => Cuid;
+    }
+    public class ClientMap : DommelEntityMap<Client>
+    {
+        public ClientMap()
+        {
+            ToTable("Clients", "dbo");
+            Map(i => i.ClientId).IsKey();
+            Map(p => p.AuditEntityId).Ignore();
+        }
+    }

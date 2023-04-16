@@ -1,3 +1,4 @@
+using System.Data;
 using Polly;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
@@ -8,6 +9,22 @@ using Polly.Retry;
 namespace Loyal.Core.Database;
 
 /// <summary>
+/// wrapper over Polly retry policy & other values for our retry
+/// </summary>
+public class DbRetryPolicy
+{
+    /// <summary>
+    /// Polly retry policy
+    /// </summary>
+    public AsyncRetryPolicy Policy { get; init; }
+    
+    /// <summary>
+    /// If set on an execute retry will close and open the connection, which is MS's recommended way to handle transient errors
+    /// </summary>
+    public bool ReconnectOnRetry { get; set; } = true;
+}
+
+/// <summary>
 /// Helper for retrying database operations using Polly.
 /// </summary>
 /// <remarks>
@@ -15,6 +32,167 @@ namespace Loyal.Core.Database;
 /// </remarks>
 public static class DbRetryPolicyFactory
 {
+    private static bool ConnectRetryableError(SqlException exception)
+    {
+        return EFCoreShouldRetryOn(exception)
+               || exception.Errors.OfType<SqlError>().Any(AdditionalSqlRetryableError)
+               || exception.Errors.OfType<SqlError>().Any(AdditionalConnectRetryableError);
+    }
+
+    private static bool SqlRetryableError(SqlException exception)
+    {
+        return EFCoreShouldRetryOn(exception)
+               || exception.Errors.OfType<SqlError>().Any(AdditionalSqlRetryableError);
+    }
+
+    private static bool AdditionalConnectRetryableError(SqlError error)
+    {
+        return error.Number switch
+        {
+            47073 or // temp for testing can't access private SQL from public network (no VPN)
+            // NOTE see the EFCore code below that says this should _not_ be retried, but that
+            // code is for commands. For connections, we are retrying.
+            // Timeout expired. The timeout period elapsed prior to completion of the operation or the server is not responding. The statement has been terminated.
+            -2 => true,
+            _ => false
+        };
+    }
+
+    private static bool AdditionalSqlRetryableError(SqlError error)
+    {
+        return error.Number switch
+        {
+            // SQL Error Code: 11001
+            // Resource ID: %d. The %s minimum guarantee is %d, maximum limit is %d and
+            // the current usage for the database is %d. However, the server is currently
+            // too busy to support requests greater than %d for this database
+            11001 => true,
+            _ => false
+        };
+    }
+
+    /// <summary>
+    /// Create your own retry policy for connecting to SQL Server.
+    /// </summary>
+    /// <param name="retryCount">number of times to retry</param>
+    /// <param name="initialTimeoutSec">first timeout, then will double on each retry</param>
+    /// <param name="maxTimeoutSec">max timeout limit (if the same as initial, constant timeout)</param>
+    /// <returns>Policy for use in OpenWithRetryAsync</returns>
+    public static DbRetryPolicy CreateConnectRetryPolicy(int retryCount = 4, int initialTimeoutSec = 5, int maxTimeoutSec = 60)
+    {
+        if (initialTimeoutSec < 2) throw new ArgumentOutOfRangeException(nameof(initialTimeoutSec), "Must be at least 2 seconds");
+        
+        return new DbRetryPolicy() { 
+            Policy = Policy
+                .Handle<TimeoutException>()
+                .Or<SqlException>(ConnectRetryableError)
+                .WaitAndRetryAsync(
+                    retryCount,
+                    // get timespan for delay
+                    (attempt) => TimeSpan.FromSeconds(Math.Min(maxTimeoutSec, Math.Pow(initialTimeoutSec, attempt))),
+                    // on retry
+                    (exception, timeSpan, retries, context) => LogRetry(exception, context, retryCount, retries))};
+    }
+
+    /// <summary>
+    /// Create your own retry policy for executing a SQL Server query or command.
+    /// </summary>
+    /// <param name="retryCount">number of times to retry</param>
+    /// <param name="initialTimeoutSec">first timeout, then will double on each retry</param>
+    /// <param name="maxTimeoutSec">max timeout limit (if the same as initial, constant timeout)</param>
+    /// <returns>Policy for use in RunWithRetryAsync</returns>
+    public static DbRetryPolicy CreateExecuteRetryPolicy(int retryCount = 4, int initialTimeoutSec = 5, int maxTimeoutSec = 60)
+    {
+        if (initialTimeoutSec < 2) throw new ArgumentOutOfRangeException(nameof(initialTimeoutSec), "Must be at least 2 seconds");
+        
+        return new DbRetryPolicy() {
+            Policy = Policy
+            .Handle<TimeoutException>()
+            .Or<SqlException>(SqlRetryableError)
+            .WaitAndRetryAsync(
+                retryCount,
+                // get timespan for delay
+                (attempt) => TimeSpan.FromSeconds(Math.Min(maxTimeoutSec, Math.Pow(initialTimeoutSec, attempt))),
+                // on retry
+                (exception, timeSpan, retries, context) =>
+                {
+                    if (context["reconnectOnRetry"] is bool and true && context["connection"] is DbConnection connection)
+                    {
+                        if (connection.State == ConnectionState.Open) { connection.Close(); }
+                        connection.Open();
+                    }
+                    LogRetry(exception, context, retryCount, retries);
+                })};
+    }
+
+    private static void LogRetry(Exception exception, Context context, int retryCount, int retries)
+    {
+        // called _before_ each retry
+        if (context["logger"] is not ILogger logger)
+            return;
+        if (retryCount != retries)
+            logger.LogDebug("SQL Retry of {retries}/{retryCount} failed {exception}", retries, retryCount, exception.Message );
+        else
+            logger.LogError(exception, "About to do last SQL Retry after failure"); // final retry, but may succeed
+    }
+
+    /// <summary>
+    /// The default retry policy for connecting to SQL Server. (4 retries, 5, 10, 20, 40 seconds)
+    /// </summary>
+    public static DbRetryPolicy DefaultConnectRetryPolicy { get; set; } = CreateConnectRetryPolicy();
+
+    /// <summary>
+    /// The default retry policy for connecting to SQL Server. (4 retries, 5, 10, 20, 40 seconds)
+    /// </summary>
+    public static DbRetryPolicy DefaultExecuteRetryPolicy { get; set; } = CreateExecuteRetryPolicy();
+
+    /// <summary>
+    /// Open a connection to SQL Server with retry in the event of transient SQL error.
+    /// </summary>
+    /// <param name="conn">The DbConnection</param>
+    /// <param name="logger">optional logger for logging final retry (all in debug)</param>
+    /// <param name="retryPolicy">optional override policy</param>
+    /// <returns>The open connection</returns>
+    public static async Task<DbConnection> OpenWithRetryAsync(this DbConnection conn, ILogger? logger = null, DbRetryPolicy? retryPolicy = null)
+    {
+        retryPolicy ??= DefaultConnectRetryPolicy;
+        var context = new Dictionary<string, object>();
+        if (logger is not null)
+        {
+            context["logger"] = logger;
+        }
+
+        await retryPolicy.Policy.ExecuteAsync((_) => conn.OpenAsync(), context).ConfigureAwait(false);
+        
+        return conn;
+    }
+
+    /// <summary>
+    /// Runs a command with retry in the event of transient SQL error.
+    /// </summary>
+    /// <param name="conn">The DbConnection</param>
+    /// <param name="runSql">func to run, Dapper, Dommel, etc.</param>
+    /// <param name="logger">optional logger for logging final retry (all in debug)</param>
+    /// <param name="retryPolicy">optional override policy</param>
+    /// <returns>TResult</returns>
+    [SuppressMessage("ReSharper", "InvertIf")]
+    public static async Task<TResult> ExecuteWithRetryAsync<TResult>(this DbConnection conn, Func<Task<TResult>> runSql, ILogger? logger = null, DbRetryPolicy? retryPolicy = null)
+    {
+        retryPolicy ??= DefaultExecuteRetryPolicy;
+        var context = new Dictionary<string, object>();
+        if (logger is not null)
+        {
+            context["logger"] = logger;
+        }
+        if (retryPolicy.ReconnectOnRetry)
+        {
+            context["reconnectOnRetry"] = true;
+            context["connection"] = conn;
+        }
+
+        return await retryPolicy.Policy.ExecuteAsync((_) => runSql(), context).ConfigureAwait(false);
+    }
+    
     // This method is taken from EFCore code:
     // https://raw.githubusercontent.com/aspnet/EntityFrameworkCore/master/src/EFCore.SqlServer/Storage/Internal/SqlServerTransientExceptionDetector.cs
     // It is occasionally updated, so you may diff this against the original once in a while.
@@ -211,156 +389,5 @@ public static class DbRetryPolicyFactory
         }
 
         return ex is TimeoutException;
-    }
-
-    private static bool ConnectRetryableError(SqlException exception)
-    {
-        return EFCoreShouldRetryOn(exception)
-               || exception.Errors.OfType<SqlError>().Any(AdditionalSqlRetryableError)
-               || exception.Errors.OfType<SqlError>().Any(AdditionalConnectRetryableError);
-    }
-
-    private static bool SqlRetryableError(SqlException exception)
-    {
-        return EFCoreShouldRetryOn(exception)
-               || exception.Errors.OfType<SqlError>().Any(AdditionalSqlRetryableError);
-    }
-
-    private static bool AdditionalConnectRetryableError(SqlError error)
-    {
-        return error.Number switch
-        {
-            47073 or // temp for testing can't access private SQL from public network (no VPN)
-            // NOTE see the EFCore code below that says this should _not_ be retried, but that
-            // code is for commands. For connections, we are retrying.
-            // Timeout expired. The timeout period elapsed prior to completion of the operation or the server is not responding. The statement has been terminated.
-            -2 => true,
-            _ => false
-        };
-    }
-
-    private static bool AdditionalSqlRetryableError(SqlError error)
-    {
-        return error.Number switch
-        {
-            // SQL Error Code: 11001
-            // Resource ID: %d. The %s minimum guarantee is %d, maximum limit is %d and
-            // the current usage for the database is %d. However, the server is currently
-            // too busy to support requests greater than %d for this database
-            11001 => true,
-            _ => false
-        };
-    }
-
-    /// <summary>
-    /// Create your own retry policy for connecting to SQL Server.
-    /// </summary>
-    /// <param name="retryCount">number of times to retry</param>
-    /// <param name="initialTimeoutSec">first timeout, then will double on each retry</param>
-    /// <param name="maxTimeoutSec">max timeout limit (if the same as initial, constant timeout)</param>
-    /// <returns>Policy for use in OpenWithRetryAsync</returns>
-    public static AsyncRetryPolicy CreateConnectRetryPolicy(int retryCount = 4, int initialTimeoutSec = 5, int maxTimeoutSec = 60)
-    {
-        if (initialTimeoutSec < 2) throw new ArgumentOutOfRangeException(nameof(initialTimeoutSec), "Must be at least 2 seconds");
-        
-        return Policy
-            .Handle<TimeoutException>()
-            .Or<SqlException>(ConnectRetryableError)
-            .WaitAndRetryAsync(
-                retryCount,
-                // get timespan for delay
-                (attempt) => TimeSpan.FromSeconds(Math.Min(maxTimeoutSec, Math.Pow(initialTimeoutSec, attempt))),
-                // on retry
-                (exception, timeSpan, retries, context) =>
-                {
-                    LogRetry(exception, context, retryCount, retries);
-                });
-    }
-
-    /// <summary>
-    /// Create your own retry policy for executing a SQL Server query or command.
-    /// </summary>
-    /// <param name="retryCount">number of times to retry</param>
-    /// <param name="initialTimeoutSec">first timeout, then will double on each retry</param>
-    /// <param name="maxTimeoutSec">max timeout limit (if the same as initial, constant timeout)</param>
-    /// <returns>Policy for use in RunWithRetryAsync</returns>
-    public static AsyncRetryPolicy CreateSqlRetryPolicy(int retryCount = 4, int initialTimeoutSec = 5, int maxTimeoutSec = 60)
-    {
-        if (initialTimeoutSec < 2) throw new ArgumentOutOfRangeException(nameof(initialTimeoutSec), "Must be at least 2 seconds");
-        
-        return Policy
-            .Handle<TimeoutException>()
-            .Or<SqlException>(SqlRetryableError)
-            .WaitAndRetryAsync(
-                retryCount,
-                // get timespan for delay
-                (attempt) => TimeSpan.FromSeconds(Math.Min(maxTimeoutSec, Math.Pow(initialTimeoutSec, attempt))),
-                // on retry
-                (exception, timeSpan, retries, context) =>
-                {
-                    LogRetry(exception, context, retryCount, retries);
-                });
-    }
-
-    private static void LogRetry(Exception exception, Context context, int retryCount, int retries)
-    {
-        // called _before_ each retry
-        if (context["logger"] is not ILogger logger)
-            return;
-        if (retryCount != retries)
-            logger.LogDebug("SQL Retry of {retries}/{retryCount} failed {exception}", retries, retryCount, exception.Message );
-        else
-            logger.LogError(exception, "About to do last SQL Retry after failure"); // final retry, but may succeed
-    }
-
-    /// <summary>
-    /// The default retry policy for connecting to SQL Server. (4 retries, 5, 10, 20, 40 seconds)
-    /// </summary>
-    public static AsyncRetryPolicy DefaultConnectRetryPolicy { get; set; } = CreateConnectRetryPolicy();
-
-    /// <summary>
-    /// The default retry policy for connecting to SQL Server. (4 retries, 5, 10, 20, 40 seconds)
-    /// </summary>
-    public static AsyncRetryPolicy DefaultSqlRetryPolicy { get; set; } = CreateSqlRetryPolicy();
-
-    /// <summary>
-    /// Open a connection to SQL Server with retry in the event of transient SQL error.
-    /// </summary>
-    /// <param name="conn">The DbConnection</param>
-    /// <param name="logger">optional logger for logging final retry (all in debug)</param>
-    /// <param name="retryPolicy">optional override policy</param>
-    /// <returns>The open connection</returns>
-    public static async Task<DbConnection> OpenWithRetryAsync(this DbConnection conn, ILogger? logger = null, AsyncRetryPolicy? retryPolicy = null)
-    {
-        retryPolicy ??= DefaultConnectRetryPolicy;
-        var context = new Dictionary<string, object>();
-        if (logger is not null)
-        {
-            context["logger"] = logger;
-        }
-
-        await retryPolicy.ExecuteAsync((_) => conn.OpenAsync(), context).ConfigureAwait(false);
-        ;
-        return conn;
-    }
-
-    /// <summary>
-    /// Runs a command with retry in the event of transient SQL error.
-    /// </summary>
-    /// <param name="conn">The DbConnection</param>
-    /// <param name="runSql">func to run, Dapper, Dommel, etc.</param>
-    /// <param name="logger">optional logger for logging final retry (all in debug)</param>
-    /// <param name="retryPolicy">optional override policy</param>
-    /// <returns>TResult</returns>
-    public static async Task<TResult> RunWithRetryAsync<TResult>(this DbConnection conn, Func<Task<TResult>> runSql, ILogger? logger = null, AsyncRetryPolicy? retryPolicy = null)
-    {
-        retryPolicy ??= DefaultSqlRetryPolicy;
-        var context = new Dictionary<string, object>();
-        if (logger is not null)
-        {
-            context["logger"] = logger;
-        }
-
-        return await retryPolicy.ExecuteAsync((_) => runSql(), context).ConfigureAwait(false);
     }
 }
