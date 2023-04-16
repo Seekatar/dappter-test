@@ -1,4 +1,5 @@
-﻿using System.Data.Common;
+﻿using System.ComponentModel.DataAnnotations;
+using System.Data.Common;
 using System.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using Dapper;
@@ -9,13 +10,13 @@ using MassTransit;
 using static System.Console;
 using Seekatar.Tools;
 using System.Text.Json;
-using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
+using System.Data;
 
 #pragma warning disable CS8321 // unused fn
 
 //============================== worker fns
-void insertIntKeyDapper(DbConnection conn, ParentWithInt c)
+void insertIntKeyDapper(IDbConnection conn, ParentWithInt c)
 {
     var sql = "INSERT INTO IntKey (S,I) VALUES (@S,@I)";
 
@@ -24,7 +25,7 @@ void insertIntKeyDapper(DbConnection conn, ParentWithInt c)
     WriteLine($"Inserted {affectedRows} into IntKey");
 }
 
-void insertGuidKeyDapper(DbConnection conn, ParentWithGuid c)
+void insertGuidKeyDapper(IDbConnection conn, ParentWithGuid c)
 {
     var sql = "INSERT INTO Guid (Id, S, I) VALUES (@Id, @S,@I)";
 
@@ -33,7 +34,7 @@ void insertGuidKeyDapper(DbConnection conn, ParentWithGuid c)
     WriteLine($"Dapper Inserted {affectedRows} into GuidKey");
 }
 
-void insertIntKeyDommel(DbConnection conn, ParentWithInt c)
+void insertIntKeyDommel(IDbConnection conn, ParentWithInt c)
 {
     var key = conn.Insert(c);
 
@@ -42,7 +43,7 @@ void insertIntKeyDommel(DbConnection conn, ParentWithInt c)
     WriteLine($"Inserted key to IntKey is {key}");
 }
 
-void insertGuidKeyDommel(DbConnection conn, ParentWithGuid c)
+void insertGuidKeyDommel(IDbConnection conn, ParentWithGuid c)
 {
     c.S = $"Dommel at {DateTime.Now}";
     var key = conn.Insert(c);
@@ -51,7 +52,7 @@ void insertGuidKeyDommel(DbConnection conn, ParentWithGuid c)
     WriteLine($"Inserted key is to GuidKey is {key}");
 }
 
-void insertChildFor(SqlConnection connection, ParentWithGuid parentWithGuid)
+void insertChildFor(IDbConnection connection, ParentWithGuid parentWithGuid)
 {
     var kid = new Child() { ParentWithGuidId = parentWithGuid.Id, ChildName = DateTime.Now.ToString() };
     connection.Insert(kid);
@@ -80,6 +81,10 @@ void testSelect(DbConnection connection)
 
 }
 //============================== main
+//============================== main
+//============================== main
+//============================== main
+
 WriteLine($"We are in {Directory.GetCurrentDirectory()}");
 var configuration = new ConfigurationBuilder()
             .AddSharedDevSettings()
@@ -102,7 +107,7 @@ FluentMapper.Initialize(config =>
     });
 
 // add this to allow the Guid to come back from the insert
-DommelMapper.AddSqlBuilder(typeof(SqlConnection), new GuidSqlServerSqlBuilder());
+// DommelMapper.AddSqlBuilder(typeof(SqlConnection), new GuidSqlServerSqlBuilder());
 
 
 var parentWithInt = new ParentWithInt() { S = $"test at {DateTime.Now}", I = 1 };
@@ -117,7 +122,7 @@ if (args.Count() > 1 && bool.TryParse(args[1], out var testDapper))
     testDommel = false;
 
 var deleteMe = new List<Guid>();
-
+#if GuidTest
 for (int i = 0; i < loop; i++)
 {
     if (testDommel)
@@ -140,10 +145,11 @@ for (int i = 0; i < loop; i++)
 WriteLine($"Looped {loop} times");
 
 testSelect(connection);
+#endif
 
 if (testDommel)
 {
-    var client = new Client() { ClientId = 123, Name = "test", Description = DateTime.Now.ToString() };
+    var client = new Client() { ClientId = 1234, Name = "test", Description = DateTime.Now.ToString() };
     connection.Insert(client);
 
     parentWithGuid.I = 123;
@@ -154,9 +160,9 @@ if (testDommel)
     WriteLine($"For updated parent, I is {x?.I}");
 
     // for this to work, the Child class must implement IEquatable
-    var parent = connection.FirstOrDefault<ParentWithGuid, Child, ParentWithGuid>(p => p.Id == parentWithGuid.Id);
-    WriteLine($"Parent has {parent?.Children.Count} kids");
-    WriteLine(JsonSerializer.Serialize(parent, new JsonSerializerOptions() { WriteIndented = true }));
+    // var parent = connection.FirstOrDefault<ParentWithGuid, Child, ParentWithGuid>(p => p.Id == parentWithGuid.Id);
+    // WriteLine($"Parent has {parent?.Children.Count} kids");
+    // WriteLine(JsonSerializer.Serialize(parent, new JsonSerializerOptions() { WriteIndented = true }));
 
     deleteMe = deleteMe.Skip(1).ToList();
     connection.DeleteMultiple<ParentWithGuid>(o => deleteMe.Contains(o.Id));
@@ -165,7 +171,7 @@ if (testDommel)
 
 class Client  {
     [Key]
-    [DatabaseGenerated(DatabaseGeneratedOption.None)]
+    [DatabaseGenerated(DatabaseGeneratedOption.None)] // w/o this using latest code get error cannot insert NULL into ClientId
     public int ClientId { get; set; }
     public string Name { get; set; } = "";
     public string Description { get; set; } = "";
