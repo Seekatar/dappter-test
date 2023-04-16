@@ -41,3 +41,22 @@ if OBJECT_ID('dbo.Children','U') IS NULL
     )
 ELSE
     PRINT 'dbo.Children EXISTS'
+
+if OBJECT_ID('dbo.Client','U') IS NULL
+    create table Client (
+        ClientId int PRIMARY KEY NOT NULL,
+        Name varchar(100) NOT NULL,
+        Description varchar(100) NOT NULL
+    )
+ELSE
+    PRINT 'dbo.Client EXISTS'
+
+if OBJECT_ID('dbo.ClientWithId','U') IS NULL
+    create table ClientWithId (
+        Id int PRIMARY KEY,
+        ClientId int NOT NULL,
+        Name varchar(100) NOT NULL,
+        Description varchar(100) NOT NULL
+    )
+ELSE
+    PRINT 'dbo.ClientWithId EXISTS'

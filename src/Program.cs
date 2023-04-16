@@ -9,6 +9,8 @@ using MassTransit;
 using static System.Console;
 using Seekatar.Tools;
 using System.Text.Json;
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
 
 #pragma warning disable CS8321 // unused fn
 
@@ -55,7 +57,30 @@ void insertChildFor(SqlConnection connection, ParentWithGuid parentWithGuid)
     connection.Insert(kid);
 }
 
+void testSelect(DbConnection connection)
+{
+    const string sql = "select /**select**/ from GuidKeys /**where**/";
+
+    var builder = new SqlBuilder();
+    var q = "test";
+    builder.AddTemplate(sql);
+    // works, but has injection issues
+    builder.Select($"'{q}' as S");
+    // doesn't work builder.Select("'@q' as S", new { q = "test"});
+    builder.Select("I");
+
+    builder.Where("I = @I", new { I = 123 });
+
+    var builderTemplate = builder.AddTemplate("Select /**select**/ from GuidKey /**where**/ ");
+
+    foreach( var p in connection.Query<ParentWithGuid>(builderTemplate.RawSql, builderTemplate.Parameters))
+    {
+        WriteLine($" >> {p.S} {p.I}");
+    }
+
+}
 //============================== main
+WriteLine($"We are in {Directory.GetCurrentDirectory()}");
 var configuration = new ConfigurationBuilder()
             .AddSharedDevSettings()
             .AddJsonFile("appsettings.json", true, true)
@@ -70,6 +95,9 @@ FluentMapper.Initialize(config =>
         config.AddMap(new IntMap());
         config.AddMap(new GuidMap());
         config.AddMap(new ChildMap());
+
+        config.AddMap(new ClientMap());
+
         config.ForDommel();
     });
 
@@ -111,8 +139,13 @@ for (int i = 0; i < loop; i++)
 }
 WriteLine($"Looped {loop} times");
 
+testSelect(connection);
+
 if (testDommel)
 {
+    var client = new Client() { ClientId = 123, Name = "test", Description = DateTime.Now.ToString() };
+    connection.Insert(client);
+
     parentWithGuid.I = 123;
     connection.Update(parentWithGuid);
     WriteLine($"Updated {parentWithGuid.Id}");
@@ -123,9 +156,22 @@ if (testDommel)
     // for this to work, the Child class must implement IEquatable
     var parent = connection.FirstOrDefault<ParentWithGuid, Child, ParentWithGuid>(p => p.Id == parentWithGuid.Id);
     WriteLine($"Parent has {parent?.Children.Count} kids");
-    WriteLine( JsonSerializer.Serialize(parent, new JsonSerializerOptions() { WriteIndented = true } ));
+    WriteLine(JsonSerializer.Serialize(parent, new JsonSerializerOptions() { WriteIndented = true }));
 
     deleteMe = deleteMe.Skip(1).ToList();
     connection.DeleteMultiple<ParentWithGuid>(o => deleteMe.Contains(o.Id));
     WriteLine($"Deleted all parent but first parent");
+}
+
+class Client  {
+    [Key]
+    [DatabaseGenerated(DatabaseGeneratedOption.None)]
+    public int ClientId { get; set; }
+    public string Name { get; set; } = "";
+    public string Description { get; set; } = "";
+}
+
+class ClientWithId : Client
+{
+    public int Id { get; set; }
 }
