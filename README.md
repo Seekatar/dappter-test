@@ -1,6 +1,6 @@
 # Dapper & Dommel Test Program
 
-This is a little .NET 6 console app to test using Dapper and Dommel to save and get objects that use Guid as a primary key.
+This is a little .NET 8 console app to test using Dapper and Dommel to save and get objects that use Guid as a primary key.
 
 ## Getting Dommel Working
 
@@ -34,6 +34,10 @@ dotnet run # use default insert loop count of 1
 dotnet run -- 10 # non default insert loop count
 dotnet run -- 1 true # run Dapper instead of Dommel test
 ```
+
+## Testing Dapper Select *
+
+To test using `select *` you can pass in `star` as a parameter and it will make some queries that force errors in classes with or without constructors.
 
 ## SQL Files
 
